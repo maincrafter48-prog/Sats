@@ -1,8 +1,7 @@
 script_name("PC Stats")
 script_description("Statistika personazha | Arizona PC | by Marco_Santiago (PC port)")
 script_author("Marco_Santiago")
-script_version("1.1.6")
-
+script_version("1.1.7")
 pcall(require, 'lib.moonloader')
 local _encoding = require('encoding')
 if _encoding then _encoding.default = 'CP1251' end

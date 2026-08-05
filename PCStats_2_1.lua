@@ -1,9 +1,9 @@
 script_name("PC Stats")
 script_description("Statistika personazha | Arizona PC | by Marco_Santiago (PC port)")
 script_author("Marco_Santiago")
-script_version("1.1.6")
+script_version("1.1.8")
 
-local SCRIPT_VER = "1.1.6"
+local SCRIPT_VER = "1.1.8"
 
 -- ── авто-обновление: репозиторий на GitHub, откуда скрипт проверяет и
 -- скачивает новую версию. version.txt в корне репозитория должен содержать

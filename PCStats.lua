@@ -1,9 +1,9 @@
 script_name("PC Stats")
 script_description("Statistika personazha | Arizona PC | by Marco_Santiago (PC port)")
 script_author("Marco_Santiago")
-script_version("1.8.7")
+script_version("1.8.5")
 
-local SCRIPT_VER = "1.8.7"
+local SCRIPT_VER = "1.8.5"
 
 -- имя чат-команды, зарегистрированной сейчас (для перерегистрации при смене)
 local _registeredMenuCmd = nil
@@ -538,24 +538,41 @@ function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal,
         return
     end
     lua_thread.create(function()
-        local own, rep, br, file = url:match("^https?://raw%.githubusercontent%.com/([^/]+)/([^/]+)/([^/]+)/(.+)$")
-        if own then
-            Updater.purgeJsdelivr(own, rep, br, file)
-        end
-        local lastErr = "fail"
-        for i = 1, #urls do
-            Updater.dlProg = 0
-            local ok, err = Updater.fetch(urls[i], dest, timeoutMs, minSize, estimatedTotal)
-            if ok then
-                Updater.lastUrl = urls[i]
-                Updater.dlProg  = 100
-                if onDone then onDone(true, nil) end
-                return
+        -- ФИКС ("автопроверка раз в минуту перестаёт работать"): раньше
+        -- тело потока ничем не было защищено — если Updater.fetch (или
+        -- purgeJsdelivr, или сам wait()) кидал непойманную ошибку
+        -- (обрыв сети, странный ответ downloadUrlToFile и т.п.), поток
+        -- просто молча умирал и onDone(...) не вызывался вообще. Так как
+        -- Updater.checking сбрасывается в false ТОЛЬКО внутри onDone
+        -- (см. Updater.check), один такой сбой намертво "залипал"
+        -- Updater.checking = true — и все дальнейшие проверки (и
+        -- автоматическая раз в минуту, и ручная кнопка/команда
+        -- /pcstats_update) переставали что-либо делать до перезапуска
+        -- скрипта. Теперь всё тело обёрнуто в pcall, и при ошибке
+        -- onDone(false, ...) вызывается в любом случае.
+        local okThread, errThread = pcall(function()
+            local own, rep, br, file = url:match("^https?://raw%.githubusercontent%.com/([^/]+)/([^/]+)/([^/]+)/(.+)$")
+            if own then
+                pcall(Updater.purgeJsdelivr, own, rep, br, file)
             end
-            lastErr = tostring(err or "fail") .. " [" .. (tostring(urls[i]):match("^https?://([^/]+)") or "?") .. "]"
-            wait(200)
+            local lastErr = "fail"
+            for i = 1, #urls do
+                Updater.dlProg = 0
+                local ok, err = Updater.fetch(urls[i], dest, timeoutMs, minSize, estimatedTotal)
+                if ok then
+                    Updater.lastUrl = urls[i]
+                    Updater.dlProg  = 100
+                    if onDone then onDone(true, nil) end
+                    return
+                end
+                lastErr = tostring(err or "fail") .. " [" .. (tostring(urls[i]):match("^https?://([^/]+)") or "?") .. "]"
+                wait(200)
+            end
+            if onDone then onDone(false, lastErr) end
+        end)
+        if not okThread then
+            if onDone then onDone(false, "внутренняя ошибка: " .. tostring(errThread)) end
         end
-        if onDone then onDone(false, lastErr) end
     end)
 end
 
@@ -567,6 +584,7 @@ function Updater.check(manual)
         return
     end
     Updater.checking = true
+    Updater.checkingSince = os.time() -- для страховочного watchdog в главном цикле, см. main()
     Updater.status = "checking"
     Updater.err = ""
     Updater.dlProg = 0
@@ -6041,7 +6059,7 @@ function notifyUpdateAvailable(remoteVer)
     Updater._lastNotifyTime = nowT
     pcall(sampAddChatMessage, "{FFD700}\x5b\x50\x43\x20\x53\x74\x61\x74\x73\x5d\x20\xc4\xee\xf1\xf2\xf3\xef\xed\xee\x20\xee\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe5\x20\x76" ..
         remoteVer .. "\x20\x28\xf3\x20\xe2\xe0\xf1\x20\x76" .. tostring(SCRIPT_VER) ..
-        "\x29\x20\x2d\x20\xee\xf2\xea\xf0\xee\xe9\x20\xec\xe5\xed\xfe\x20\xe8\x20\xed\xe0\xe6\xec\xe8\x20\x22\xce\xe1\xed\xee\xe2\xe8\xf2\xfc\x22\x2c\x20\xeb\xe8\xe1\xee\x20\xea\xee\xec\xe0\xed\xe4\xe0\x20\x2f\x70\x63\x73\x74\x61\x74\x73\x5f\x75\x70\x64\x61\x74\x65", -1)
+        "\x29\x20\x2d\x20\xee\xf2\xea\xf0\xee\xe9\x20\xec\xe5\xed\xfe\x20\xe8\x20\xed\xe0\xe6\xec\xe8\x20\x22\xce\xe1\xed\xee\xe2\xe8\xf2\xfc\x22", -1)
     if (cfg.updatePopupEnabled ~= false) and not St.winOpen then
         St._updatePopupOpen = true
     end
@@ -9859,6 +9877,19 @@ function main()
                 St._phoneOpBusySince = nil
                 pcall(sampAddChatMessage, "{FFAA00}[PC Stats] " ..
                     "\xf2\xe5\xeb\xe5\xf4\xee\xed\x20\xef\xf0\xe8\xed\xf3\xe4\xe8\xf2\xe5\xeb\xfc\xed\xee\x20\xee\xf1\xe2\xee\xe1\xee\xe6\xe4\xb8\xed\x20\x28watchdog\x29", -1)
+            end
+
+            -- ФИКС ("автопроверка версии раз в минуту перестаёт работать"):
+            -- тот же watchdog-паттерн, что и у _phoneOpBusy выше — если
+            -- Updater.checking залип дольше 25 секунд (сам Updater.download
+            -- работает с таймаутом 10с на URL, плюс до 4 зеркал — с запасом
+            -- этого достаточно), принудительно сбрасываем флаг, чтобы и
+            -- ручная кнопка/команда /pcstats_update, и автопроверка каждую
+            -- минуту не оставались заблокированными до перезапуска скрипта.
+            if Updater.checking and Updater.checkingSince and (os.time() - Updater.checkingSince) > 25 then
+                Updater.checking = false
+                Updater.status   = "error"
+                Updater.err      = "\xef\xf0\xee\xe2\xe5\xf0\xea\xe0\x20\xe7\xe0\xe2\xe8\xf1\xeb\xe0\x20\x28watchdog\x29"
             end
 
         end)

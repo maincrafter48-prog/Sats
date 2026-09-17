@@ -1,9 +1,9 @@
 script_name("PC Stats")
 script_description("Statistika personazha | Arizona PC | by Marco_Santiago (PC port)")
 script_author("Marco_Santiago")
-script_version("1.8.7")
+script_version("1.8.5")
 
-local SCRIPT_VER = "1.8.7"
+local SCRIPT_VER = "1.8.5"
 
 -- имя чат-команды, зарегистрированной сейчас (для перерегистрации при смене)
 local _registeredMenuCmd = nil
@@ -352,7 +352,18 @@ end
 -- добавляет к каждому URL уникальный параметр времени, из-за чего
 -- CDN физически не может подсунуть старый закэшированный ответ — для
 -- него это каждый раз "новый" адрес.
-function Updater.candidates(url, cacheBust)
+-- ФИКС "проверка версии всё равно показывает старое число": jsDelivr и
+-- raw.githack — это CDN-зеркала поверх веток (не тегов/коммитов), и даже
+-- с анти-кэш параметром в строке запроса иногда продолжают отдавать
+-- старое содержимое ещё какое-то время после коммита — их собственный
+-- ORIGIN (не только edge-кэш) может подтягивать новый файл с задержкой.
+-- raw.githubusercontent.com отдаёт файлы веток напрямую с GitHub и с
+-- анти-кэш параметром в строке запроса обновляется быстро и надёжно.
+-- preferDirect=true ставит его ПЕРВЫМ в списке (для проверки версии —
+-- там счёт на секунды и нужна максимальная свежесть); для скачивания
+-- самого файла скрипта порядок не меняем — там jsDelivr выигрывает по
+-- скорости, а данные лишний раз всё равно проверяются на целостность.
+function Updater.candidates(url, cacheBust, preferDirect)
     local list = {}
     url = tostring(url or "")
     if url == "" then return list end
@@ -361,12 +372,20 @@ function Updater.candidates(url, cacheBust)
     if cacheBust then
         cb = "?_cb=" .. tostring(os.time()) .. tostring(math.random(1000, 9999))
     end
+    local directUrl = url .. cb
+    local jsDelivrUrl, githackUrl
     if own then
-        list[#list + 1] = string.format("https://cdn.jsdelivr.net/gh/%s/%s@%s/%s", own, rep, br, file) .. cb
+        jsDelivrUrl = string.format("https://cdn.jsdelivr.net/gh/%s/%s@%s/%s", own, rep, br, file) .. cb
+        githackUrl  = string.format("https://raw.githack.com/%s/%s/%s/%s", own, rep, br, file) .. cb
     end
-    list[#list + 1] = url .. cb
-    if own then
-        list[#list + 1] = string.format("https://raw.githack.com/%s/%s/%s/%s", own, rep, br, file) .. cb
+    if preferDirect then
+        list[#list + 1] = directUrl
+        if jsDelivrUrl then list[#list + 1] = jsDelivrUrl end
+        if githackUrl  then list[#list + 1] = githackUrl  end
+    else
+        if jsDelivrUrl then list[#list + 1] = jsDelivrUrl end
+        list[#list + 1] = directUrl
+        if githackUrl  then list[#list + 1] = githackUrl  end
     end
     return list
 end
@@ -505,7 +524,7 @@ function Updater.fetch(url, dest, timeoutMs, minSize, estimatedTotal)
     return true, nil
 end
 
-function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal, cacheBust)
+function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal, cacheBust, preferDirect)
     url = tostring(url or ""); dest = tostring(dest or "")
     timeoutMs = tonumber(timeoutMs) or 12000
     if cacheBust == nil then cacheBust = true end -- по умолчанию всегда сбрасываем кэш CDN-зеркал
@@ -513,7 +532,7 @@ function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal,
         if onDone then onDone(false, "пустой URL") end
         return
     end
-    local urls = Updater.candidates(url, cacheBust)
+    local urls = Updater.candidates(url, cacheBust, preferDirect)
     if #urls == 0 then
         if onDone then onDone(false, "пустой URL") end
         return
@@ -586,7 +605,7 @@ function Updater.check(manual)
         if type(notifyUpdateAvailable) == "function" then
             pcall(notifyUpdateAvailable, remote)
         end
-    end, 1, 10000)
+    end, 1, 10000, nil, true, true)
 end
 
 function Updater.doDownload()

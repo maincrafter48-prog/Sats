@@ -1,9 +1,9 @@
 script_name("PC Stats")
 script_description("Statistika personazha | Arizona PC | by Marco_Santiago (PC port)")
 script_author("Marco_Santiago")
-script_version("1.3.5")
+script_version("1.3.4")
 
-local SCRIPT_VER = "1.8.5"
+local SCRIPT_VER = "1.8.3"
 
 -- имя чат-команды, зарегистрированной сейчас (для перерегистрации при смене)
 local _registeredMenuCmd = nil
@@ -9624,16 +9624,18 @@ function main()
             -- если игрок сидел в игре часами, ничего больше не
             -- проверялось. Теперь это постоянный цикл: первая проверка —
             -- вскоре после спавна (тот самый "при входе"), а дальше —
-            -- каждый час, пока сессия активна, чтобы игрок узнал об
-            -- обновлении, даже если оно вышло уже ПОСЛЕ того, как он
-            -- зашёл в игру. Сам повтор чат-сообщения/попапа не чаще раза
-            -- в час контролируется внутри notifyUpdateAvailable() — этот
-            -- цикл лишь дёргает проверку версии на GitHub.
+            -- каждую МИНУТУ, пока сессия активна (по просьбе — раньше
+            -- было раз в час), чтобы новая версия обнаруживалась
+            -- практически сразу после публикации на GitHub. Сам чат
+            -- + попап при этом не спамят каждую минуту одним и тем же —
+            -- повтор не чаще раза в час на одну и ту же версию
+            -- контролируется отдельно внутри notifyUpdateAvailable();
+            -- этот цикл лишь дёргает саму проверку версии на GitHub.
             lua_thread.create(function()
                 wait(5000)
                 pcall(function() Updater.check(false) end)
                 while true do
-                    wait(3600 * 1000)
+                    wait(60 * 1000)
                     if cfg.updateCheckOnStart then
                         pcall(function() Updater.check(false) end)
                     end

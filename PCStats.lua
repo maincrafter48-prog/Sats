@@ -619,7 +619,7 @@ function Updater.doDownload()
     -- сообщения в чат — и снаружи было не отличить "качается", "записал
     -- новый файл", "перезапускаю" от "просто крутит анимацию и ничего
     -- не делает". Для ручной кнопки "Обновить" теперь виден каждый шаг.
-    pcall(sampAddChatMessage, "{25AAFF}\x5b\x50\x43\x20\x53\x74\x61\x74\x73\x5d\x20\xce\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe5\x3a\x20\xea\xe0\xf7\xe0\xfe\x20\xf1\x20\x47\x69\x74\x48\x75\x62\x2e\x2e\x2e", -1)
+    pcall(sampAddChatMessage, "{25AAFF}\x5b\x50\x43\x20\x53\x74\x61\x74\x73\x5d\x20\xce\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe5\x3a\x20\xea\xe0\xf7\xe0\xfe\x2e\x2e\x2e", -1)
     local tmp = Updater.tmpDir() .. "/PCStats_upd_new.lua"
     -- minSize поднят с 2000 до 20000 (реальный размер скрипта — сотни КБ,
     -- 2000 байт легко набиралось ещё до реального завершения закачки),
@@ -664,20 +664,12 @@ function Updater.doDownload()
                 return
             end
         end
-        pcall(sampAddChatMessage, "{00FF88}\x5b\x50\x43\x20\x53\x74\x61\x74\x73\x5d\x20\xce\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe5\x3a\x20\xf4\xe0\xe9\xeb\x20\xf1\xea\xe0\xf7\xe0\xed\x20\xe8\x20\xef\xf0\xee\xe2\xe5\xf0\xe5\xed\x2c\x20\xe7\xe0\xef\xe8\xf1\xfb\xe2\xe0\xfe\x20\xef\xee\xe2\xe5\xf0\xf5\x20\xf1\xf2\xe0\xf0\xee\xe3\xee\x2e\x2e\x2e\x20\x28" .. tostring(#body) .. " \xe1\xe0\xe9\xf2\x29", -1)
-        -- ФИКС/добавлено: сверяем версию, зашитую ВНУТРИ скачанного файла
-        -- (SCRIPT_VER), с тем, что было объявлено в version.txt на
-        -- GitHub. Если это одна из главных причин бесконечного цикла:
-        -- version.txt подняли, а сам PCStats.lua в репозитории забыли —
-        -- тогда после каждого "успешного" обновления и перезапуска
-        -- скрипт снова видит себя устаревшим и предлагает обновиться
-        -- заново, хотя технически всё скачалось и записалось верно.
-        local newVerInBody = body:match('SCRIPT_VER%s*=%s*"([%d%.]+)"')
-        if newVerInBody and Updater.latest and newVerInBody ~= tostring(Updater.latest) then
-            pcall(sampAddChatMessage, "{FFD700}\x5b\x50\x43\x20\x53\x74\x61\x74\x73\x5d\x20\xc2\xcd\xc8\xcc\xc0\xcd\xc8\xc5\x3a\x20\xf1\xea\xe0\xf7\xe0\xed\xed\xfb\xe9\x20\xf4\xe0\xe9\xeb\x20\xf1\xee\xee\xe1\xf9\xe0\xe5\xf2\x20\xe2\xe5\xf0\xf1\xe8\xfe\x20\x76" .. newVerInBody ..
-                "\x2c\x20\xf5\xee\xf2\xff\x20\x76\x65\x72\x73\x69\x6f\x6e\x2e\x74\x78\x74\x20\xed\xe0\x20\x47\x69\x74\x48\x75\x62\x20\xe3\xee\xe2\xee\xf0\xe8\xf2\x20\x76" .. tostring(Updater.latest) ..
-                "\x20\x97\x20\xee\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe5\x20\xe2\xf1\xb8\x20\xf0\xe0\xe2\xed\xee\x20\xef\xee\xf1\xf2\xe0\xe2\xeb\xe5\xed\xee\x2c\x20\xed\xee\x20\xef\xee\xf5\xee\xe6\xe5\x20\xe2\xfb\x20\xe7\xe0\xe1\xfb\xeb\xe8\x20\xef\xee\xe4\xed\xff\xf2\xfc\x20\x53\x43\x52\x49\x50\x54\x5f\x56\x45\x52\x20\xe2\xed\xf3\xf2\xf0\xe8\x20\x50\x43\x53\x74\x61\x74\x73\x2e\x6c\x75\x61\x20\xe2\x20\xf0\xe5\xef\xee\xe7\xe8\xf2\xee\xf0\xe8\xe8\x20\x28\xe8\xe7\x2d\xe7\xe0\x20\xfd\xf2\xee\xe3\xee\x20\xef\xee\xf1\xeb\xe5\x20\xea\xe0\xe6\xe4\xee\xe3\xee\x20\xee\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xff\x20\xf1\xea\xf0\xe8\xef\xf2\x20\xf1\xed\xee\xe2\xe0\x20\xf1\xf7\xe8\xf2\xe0\xe5\xf2\x20\xf1\xe5\xe1\xff\x20\xf3\xf1\xf2\xe0\xf0\xe5\xe2\xf8\xe8\xec\x29", -1)
-        end
+        -- по просьбе: промежуточное сообщение "файл скачан и проверен,
+        -- записываю поверх старого..." убрано — от закачки сразу переходим
+        -- к записи на диск без лишней строчки в чат
+        -- по просьбе: предупреждение "ВНИМАНИЕ: скачанный файл сообщает
+        -- версию vX, хотя version.txt говорит vY..." убрано полностью —
+        -- обновление в любом случае ставится как есть
         -- backup
         pcall(function()
             local old = Updater.readFile(path)
@@ -697,7 +689,7 @@ function Updater.doDownload()
         pcall(os.remove, tmp)
         Updater.dlProg = 100
         Updater.dlState = "done"
-        pcall(sampAddChatMessage, "{00FF88}\x5b\x50\x43\x20\x53\x74\x61\x74\x73\x5d\x20\xce\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe5\x3a\x20\xf4\xe0\xe9\xeb\x20\xe7\xe0\xec\xe5\xed\xb8\xed\x20\xed\xe0\x20\xe4\xe8\xf1\xea\xe5\x2c\x20\xef\xe5\xf0\xe5\xe7\xe0\xef\xf3\xf1\xea\xe0\xfe\x20\xf1\xea\xf0\xe8\xef\xf2\x2e\x2e\x2e", -1)
+        pcall(sampAddChatMessage, "{00FF88}\x5b\x50\x43\x20\x53\x74\x61\x74\x73\x5d\x20\xce\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe5\x20\xe7\xe0\xe2\xe5\xf0\xf8\xe5\xed\xee\x2c\x20\xef\xe5\xf0\xe5\xe7\xe0\xef\xf3\xf1\xea\xe0\xfe\x20\xf1\xea\xf0\xe8\xef\xf2\x2e\x2e\x2e", -1)
         lua_thread.create(function()
             wait(900)
             local okReload, reloadErr = false, nil
@@ -7497,16 +7489,15 @@ local function drawAboutInner(h)
             end
             imgui.PopStyleColor(3)
 
-            -- ФИКС "жму Обновить — кнопки вообще нет / ничего не жмётся":
-            -- раньше кнопка "Обновить" показывалась ТОЛЬКО если статус
-            -- уже был "outdated" — а если авто-проверка при входе зависла,
-            -- ещё не завершилась или вернула что-то другое (ok/error),
-            -- кнопки скачивания попросту не было на экране, и игрок жал
-            -- на пустое место. Теперь кнопка есть всегда (кроме момента,
-            -- когда закачка уже идёт) — при нажатии doDownload() сам
-            -- скачивает актуальную версию с GitHub независимо от того,
-            -- успела ли отработать фоновая проверка версии.
-            if dls ~= "downloading" then
+            -- ФИКС (по просьбе): кнопка "Обновить" снова показывается
+            -- только ПОСЛЕ нажатия "Проверить" и только если найдена
+            -- более новая версия (us == "outdated"). Раньше кнопка была
+            -- видна всегда — это было временной мерой на случай, если
+            -- фоновая проверка при входе зависала и кнопки вообще не
+            -- было на экране; сейчас у doDownload() есть свои явные
+            -- сообщения об ошибках на каждый такой случай, так что
+            -- держать кнопку видимой всё время больше не нужно.
+            if us == "outdated" and dls ~= "downloading" then
                 imgui.SetCursorPos(imgui.ImVec2(aw - btnW - SFtext(16), SFtext(12)))
                 imgui.PushStyleColor(imgui.Col.Button,        iv4(0.15,0.55,0.25,1.0))
                 imgui.PushStyleColor(imgui.Col.ButtonHovered, iv4(0.20,0.70,0.32,1.0))

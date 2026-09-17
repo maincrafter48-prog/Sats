@@ -1,9 +1,9 @@
 script_name("PC Stats")
 script_description("Statistika personazha | Arizona PC | by Marco_Santiago (PC port)")
 script_author("Marco_Santiago")
-script_version("1.3.4")
+script_version("1.3.6")
 
-local SCRIPT_VER = "1.8.3"
+local SCRIPT_VER = "1.8.6"
 
 -- имя чат-команды, зарегистрированной сейчас (для перерегистрации при смене)
 local _registeredMenuCmd = nil

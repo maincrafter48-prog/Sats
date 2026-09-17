@@ -1,9 +1,9 @@
 script_name("PC Stats")
 script_description("Statistika personazha | Arizona PC | by Marco_Santiago (PC port)")
 script_author("Marco_Santiago")
-script_version("1.3.6")
+script_version("1.3.4")
 
-local SCRIPT_VER = "1.8.6"
+local SCRIPT_VER = "1.8.3"
 
 -- имя чат-команды, зарегистрированной сейчас (для перерегистрации при смене)
 local _registeredMenuCmd = nil
@@ -339,17 +339,34 @@ function Updater.nocache(u)
 end
 
 -- зеркала: jsDelivr (можно принудительно сбросить кэш) -> raw.githubusercontent -> raw.githack
-function Updater.candidates(url)
+-- ФИКС "проверка версии показывает старое число, хотя на GitHub давно
+-- новое": проверка версии качает version.txt через 3 зеркала подряд
+-- (jsDelivr CDN, raw.githubusercontent.com напрямую, raw.githack.com) —
+-- и ВСЕ ТРИ кэшируют содержимое на своей стороне (jsDelivr — иногда
+-- часами, githack тоже держит собственный кэш поверх jsDelivr,
+-- raw.githubusercontent.com — на несколько минут через Fastly). Сброс
+-- кэша (purgeJsdelivr) применяется только к jsDelivr и не мгновенный —
+-- если он ещё не успел примениться, или "отдало" закэшированное
+-- githack/raw-зеркало, скрипт честно получает СТАРОЕ число версии и
+-- считает его актуальным, хотя на GitHub давно другое. cacheBust
+-- добавляет к каждому URL уникальный параметр времени, из-за чего
+-- CDN физически не может подсунуть старый закэшированный ответ — для
+-- него это каждый раз "новый" адрес.
+function Updater.candidates(url, cacheBust)
     local list = {}
     url = tostring(url or "")
     if url == "" then return list end
     local own, rep, br, file = url:match("^https?://raw%.githubusercontent%.com/([^/]+)/([^/]+)/([^/]+)/(.+)$")
-    if own then
-        list[#list + 1] = string.format("https://cdn.jsdelivr.net/gh/%s/%s@%s/%s", own, rep, br, file)
+    local cb = ""
+    if cacheBust then
+        cb = "?_cb=" .. tostring(os.time()) .. tostring(math.random(1000, 9999))
     end
-    list[#list + 1] = url
     if own then
-        list[#list + 1] = string.format("https://raw.githack.com/%s/%s/%s/%s", own, rep, br, file)
+        list[#list + 1] = string.format("https://cdn.jsdelivr.net/gh/%s/%s@%s/%s", own, rep, br, file) .. cb
+    end
+    list[#list + 1] = url .. cb
+    if own then
+        list[#list + 1] = string.format("https://raw.githack.com/%s/%s/%s/%s", own, rep, br, file) .. cb
     end
     return list
 end
@@ -488,14 +505,15 @@ function Updater.fetch(url, dest, timeoutMs, minSize, estimatedTotal)
     return true, nil
 end
 
-function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal)
+function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal, cacheBust)
     url = tostring(url or ""); dest = tostring(dest or "")
     timeoutMs = tonumber(timeoutMs) or 12000
+    if cacheBust == nil then cacheBust = true end -- по умолчанию всегда сбрасываем кэш CDN-зеркал
     if url == "" or dest == "" then
         if onDone then onDone(false, "пустой URL") end
         return
     end
-    local urls = Updater.candidates(url)
+    local urls = Updater.candidates(url, cacheBust)
     if #urls == 0 then
         if onDone then onDone(false, "пустой URL") end
         return

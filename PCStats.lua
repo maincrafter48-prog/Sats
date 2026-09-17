@@ -982,6 +982,12 @@ local cfg = {
     -- не трогая при этом ручную проверку/обновление во вкладке "О скрипте".
     updateCheckOnStart = true,
     updateNotifyEnabled = true,
+    -- отдельный тумблер именно для всплывающей менюшки (по просьбе) —
+    -- позволяет оставить сообщение в чате, но отключить только попап,
+    -- или наоборот. Сама менюшка при этом ещё и не показывается, пока
+    -- открыто главное окно скрипта (см. notifyUpdateAvailable) — там
+    -- и так видно обновление во вкладке "О скрипте".
+    updatePopupEnabled = true,
     updateVersionUrl = "",
     updateScriptUrl  = "",
 
@@ -1161,6 +1167,7 @@ local function applyCfgData(m)
     cfg.errorR = clampNum(m.errorR, -1, 1, -1); cfg.errorG = clampNum(m.errorG, -1, 1, -1); cfg.errorB = clampNum(m.errorB, -1, 1, -1)
     cfg.updateCheckOnStart = toBool(m.updateCheckOnStart, true)
     cfg.updateNotifyEnabled = toBool(m.updateNotifyEnabled, true)
+    cfg.updatePopupEnabled = toBool(m.updatePopupEnabled, true)
     cfg.updateVersionUrl = tostring(m.updateVersionUrl or "")
     cfg.updateScriptUrl  = tostring(m.updateScriptUrl or "")
     cfg.fontSize      = clampNum(m.fontSize, 0.7, 2.0, 1.25)
@@ -1284,6 +1291,7 @@ local function saveCfg()
             errorR = tostring(cfg.errorR or -1), errorG = tostring(cfg.errorG or -1), errorB = tostring(cfg.errorB or -1),
             updateCheckOnStart = tostring(cfg.updateCheckOnStart == true),
             updateNotifyEnabled = tostring(cfg.updateNotifyEnabled ~= false),
+            updatePopupEnabled = tostring(cfg.updatePopupEnabled ~= false),
             updateVersionUrl = tostring(cfg.updateVersionUrl or ""),
             updateScriptUrl  = tostring(cfg.updateScriptUrl or ""),
             fontSize      = tostring(cfg.fontSize),
@@ -5982,9 +5990,13 @@ end
 -- окно скрипта.
 -- ============================================================
 
--- вызывается из Updater.check() при статусе "outdated". Общий тумблер
--- cfg.updateNotifyEnabled отключает разом и чат-сообщение, и попап —
--- ручная проверка/обновление во вкладке "О скрипте" от него не зависит.
+-- вызывается из Updater.check() при статусе "outdated". cfg.updateNotifyEnabled
+-- управляет сообщением в чат целиком (выключен — нет ни чата, ни попапа).
+-- cfg.updatePopupEnabled — отдельно только попапом. И, по просьбе, попап
+-- НЕ показывается, если у игрока в этот момент открыто главное окно
+-- скрипта (например он сам только что жал "Обновить" во вкладке "О
+-- скрипте" — там и так всё видно, дублировать нечего). Ручная проверка/
+-- обновление во вкладке "О скрипте" от обоих тумблеров не зависит.
 -- Повтор не чаще раза в час на одну и ту же версию (по просьбе), но
 -- сразу заново — если версия на GitHub успела поменяться ещё раз.
 function notifyUpdateAvailable(remoteVer)
@@ -6001,7 +6013,9 @@ function notifyUpdateAvailable(remoteVer)
     pcall(sampAddChatMessage, "{FFD700}\x5b\x50\x43\x20\x53\x74\x61\x74\x73\x5d\x20\xc4\xee\xf1\xf2\xf3\xef\xed\xee\x20\xee\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe5\x20\x76" ..
         remoteVer .. "\x20\x28\xf3\x20\xe2\xe0\xf1\x20\x76" .. tostring(SCRIPT_VER) ..
         "\x29\x20\x2d\x20\xee\xf2\xea\xf0\xee\xe9\x20\xec\xe5\xed\xfe\x20\xe8\x20\xed\xe0\xe6\xec\xe8\x20\x22\xce\xe1\xed\xee\xe2\xe8\xf2\xfc\x22\x2c\x20\xeb\xe8\xe1\xee\x20\xea\xee\xec\xe0\xed\xe4\xe0\x20\x2f\x70\x63\x73\x74\x61\x74\x73\x5f\x75\x70\x64\x61\x74\x65", -1)
-    St._updatePopupOpen = true
+    if (cfg.updatePopupEnabled ~= false) and not St.winOpen then
+        St._updatePopupOpen = true
+    end
 end
 
 -- маленькое окошко-уведомление по центру экрана, в стиле остальных
@@ -6012,6 +6026,15 @@ end
 function drawUpdateAvailablePopup()
     if not St._updatePopupOpen then
         St._updatePopupOpenedOnce = false
+        return
+    end
+    -- по просьбе: попап нужен только пока закрыто главное окно скрипта —
+    -- если игрок открыл меню (например сам зашёл в "О скрипте"), попап
+    -- больше не нужен, там и так всё видно
+    if St.winOpen then
+        St._updatePopupOpen = false
+        St._updatePopupOpenedOnce = false
+        pcall(imgui.CloseCurrentPopup)
         return
     end
     if not St._updatePopupOpenedOnce then
@@ -6068,14 +6091,7 @@ function drawUpdateAvailablePopup()
         imgui.Spacing()
         local aw2 = imgui.GetContentRegionAvail().x
         local half = (aw2 - S(8)) * 0.5
-        imgui.PushStyleColor(imgui.Col.Button,        iv4(r0*0.35,g0*0.35,b0*0.35,1.0))
-        imgui.PushStyleColor(imgui.Col.ButtonHovered, iv4(r0*0.55,g0*0.55,b0*0.55,1.0))
-        imgui.PushStyleColor(imgui.Col.ButtonActive,  iv4(r0,g0,b0,1.0))
-        if imgui.Button(u8"\xcf\xf0\xee\xe2\xe5\xf0\xe8\xf2\xfc##updPopCheck", imgui.ImVec2(half, S(28))) then
-            Updater.check(true)
-        end
-        imgui.PopStyleColor(3)
-        imgui.SameLine(0, S(8))
+
         if dls ~= "downloading" then
             imgui.PushStyleColor(imgui.Col.Button,        iv4(0.15,0.55,0.25,1.0))
             imgui.PushStyleColor(imgui.Col.ButtonHovered, iv4(0.20,0.70,0.32,1.0))
@@ -6089,27 +6105,31 @@ function drawUpdateAvailablePopup()
             imgui.Button(u8"\xce\xe1\xed\xee\xe2\xe8\xf2\xfc##updPopDoBusy", imgui.ImVec2(half, S(28)))
             imgui.PopStyleColor(1)
         end
+        imgui.SameLine(0, S(8))
+        imgui.PushStyleColor(imgui.Col.Button,        iv4(0.30,0.30,0.32,1.0))
+        imgui.PushStyleColor(imgui.Col.ButtonHovered, iv4(0.42,0.42,0.46,1.0))
+        imgui.PushStyleColor(imgui.Col.ButtonActive,  iv4(0.55,0.55,0.60,1.0))
+        if imgui.Button(u8"\xc7\xe0\xea\xf0\xfb\xf2\xfc##updPopClose", imgui.ImVec2(half, S(28))) then
+            St._updatePopupOpen = false
+            imgui.CloseCurrentPopup()
+        end
+        imgui.PopStyleColor(3)
 
         imgui.Dummy(imgui.ImVec2(0, S(6)))
         imgui.Separator()
         imgui.Dummy(imgui.ImVec2(0, S(6)))
 
-        -- тумблер прямо в попапе — по просьбе, дублирует тот же, что и
-        -- во вкладке "Настройки", чтобы можно было отключить, не выходя
+        -- тумблер именно для этого окошка (по просьбе — отдельно от
+        -- сообщения в чат): выключил — окошко больше не появляется, но
+        -- чат-сообщение "доступна версия" продолжит приходить
         do
-            local isOn = cfg.updateNotifyEnabled ~= false
+            local isOn = cfg.updatePopupEnabled ~= false
             if drawToggleSwitch("##updPopToggle", isOn) then
-                cfg.updateNotifyEnabled = not isOn; saveCfg()
+                cfg.updatePopupEnabled = not isOn; saveCfg()
             end
             imgui.SameLine(0, S(8))
             imgui.TextColored(thDim(),
-                u8"\xd3\xe2\xe5\xe4\xee\xec\xeb\xff\xf2\xfc\x20\xee\xe1\x20\xee\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xff\xf5")
-        end
-
-        imgui.Dummy(imgui.ImVec2(0, S(4)))
-        if imgui.Button(u8"\xc7\xe0\xea\xf0\xfb\xf2\xfc##updPopClose", imgui.ImVec2(aw2, S(24))) then
-            St._updatePopupOpen = false
-            imgui.CloseCurrentPopup()
+                u8"\xcf\xee\xea\xe0\xe7\xfb\xe2\xe0\xf2\xfc\x20\xfd\xf2\xee\x20\xee\xea\xed\xee")
         end
     else
         -- закрылось само (клик мимо / Escape) — сбрасываем флаг, иначе
@@ -6742,9 +6762,10 @@ function drawNotificationsSection()
     end
 
     -- ── по просьбе: отдельный тумблер для уведомлений об обновлении
-    -- скрипта — отключает И сообщение в чате, И всплывающую менюшку
-    -- "Доступно обновление". Ручная проверка/обновление во вкладке
-    -- "О скрипте" на этот тумблер не завязана и работает всегда.
+    -- скрипта (сообщение в чате). Всплывающая менюшка управляется своим
+    -- ОТДЕЛЬНЫМ тумблером ниже — и в любом случае не показывается, пока
+    -- открыто главное окно скрипта. Ручная проверка/обновление во
+    -- вкладке "О скрипте" ни от одного из этих тумблеров не зависит.
     imgui.Spacing()
     do
         local isOn = cfg.updateNotifyEnabled ~= false
@@ -6756,6 +6777,18 @@ function drawNotificationsSection()
         end
         imgui.SameLine(0, S(8))
         imgui.TextColored(iv4(1,1,1,1), u8"\xd3\xe2\xe5\xe4\xee\xec\xeb\xe5\xed\xe8\xff\x20\xee\xe1\x20\xee\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe8\x20\xf1\xea\xf0\xe8\xef\xf2\xe0")
+    end
+    imgui.Spacing()
+    do
+        local isOn = cfg.updatePopupEnabled ~= false
+        if drawToggleSwitch("##popupUpdateToggle", isOn) then
+            cfg.updatePopupEnabled = not isOn; saveCfg()
+            if not (cfg.updatePopupEnabled ~= false) then
+                St._updatePopupOpen = false
+            end
+        end
+        imgui.SameLine(0, S(8))
+        imgui.TextColored(iv4(1,1,1,1), u8"\xc2\xf1\xef\xeb\xfb\xe2\xe0\xfe\xf9\xe5\xe5\x20\xee\xea\xed\xee\x20\xee\xe1\x20\xee\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe8")
     end
 
     -- ФИКС (по просьбе): тумблер "Обновление курса валют" убран совсем.

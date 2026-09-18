@@ -1,7 +1,7 @@
 script_name("PC Stats")
 script_description("Statistika personazha | Arizona PC | by Marco_Santiago (PC port)")
 script_author("Marco_Santiago")
-script_version("1.8.9")
+script_version("1.8.8")
 
 local SCRIPT_VER = "1.8.9"
 
@@ -299,6 +299,41 @@ function Updater.verLt(a, b)
     return false
 end
 
+-- нормализация: "v1.8.8" / "1.8.8.0.0" -> "1.8.8"
+function Updater.normVer(s)
+    s = tostring(s or ""):gsub("^[vV]", ""):gsub("%s+", "")
+    local parts = {}
+    for p in s:gmatch("%d+") do parts[#parts + 1] = tostring(tonumber(p) or 0) end
+    while #parts > 1 and parts[#parts] == "0" do table.remove(parts) end
+    if #parts == 0 then return "0" end
+    return table.concat(parts, ".")
+end
+
+-- строгий разбор version.txt (не HTML/404/мусор)
+function Updater.parseVersionText(raw)
+    raw = tostring(raw or "")
+    raw = raw:gsub("^\239\187\191", "")  -- UTF-8 BOM
+    raw = raw:gsub("^\194\160", "")       -- leading NBSP
+    local line = raw:match("([^\r\n]+)") or raw
+    line = line:gsub("^%s+", ""):gsub("%s+$", "")
+    line = line:gsub("\194\160", "")
+    if line == "" then return nil end
+    local low = line:lower()
+    if low:find("<html", 1, true) or low:find("<!doctype", 1, true) then
+        return nil
+    end
+    local remote = line:match("^[vV]?(%d+(%.%d+)+)$")
+    if not remote then return nil end
+    return remote
+end
+
+function Updater.shouldCheck()
+    local lastT = 0
+    if cfg then lastT = tonumber(cfg.lastCheckTime) or 0 end
+    if lastT > 0 and (os.time() - lastT) < (30 * 60) then return false end
+    return true
+end
+
 function Updater.scriptPath()
     local p = nil
     pcall(function()
@@ -551,10 +586,8 @@ function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal,
         -- скрипта. Теперь всё тело обёрнуто в pcall, и при ошибке
         -- onDone(false, ...) вызывается в любом случае.
         local okThread, errThread = pcall(function()
-            local own, rep, br, file = url:match("^https?://raw%.githubusercontent%.com/([^/]+)/([^/]+)/([^/]+)/(.+)$")
-            if own then
-                pcall(Updater.purgeJsdelivr, own, rep, br, file)
-            end
+            -- purge.jsdelivr только при скачивании .lua (см. doDownload),
+            -- не при каждой проверке version.txt
             local lastErr = "fail"
             for i = 1, #urls do
                 Updater.dlProg = 0
@@ -583,45 +616,90 @@ function Updater.check(manual)
         Updater.err = "\xed\xe5\x20\xe7\xe0\xe4\xe0\xed\x20\x47\x69\x74\x48\x75\x62\x20\x28\x50\x43\x53\x5f\x47\x48\x5f\x4f\x57\x4e\x45\x52\x20\x2f\x20\x52\x45\x50\x4f\x29"
         return
     end
-    Updater.checking = true
-    Updater.checkingSince = os.time() -- для страховочного watchdog в главном цикле, см. main()
-    Updater.status = "checking"
+    -- D9: ручная кнопка — 30с кэш после успешной проверки
+    if manual and Updater.lastCheck and Updater.lastCheck > 0
+        and (os.time() - Updater.lastCheck) < 30
+        and (Updater.status == "ok" or Updater.status == "outdated")
+        and Updater.localN then
+        return
+    end
+    -- B2: фоновая проверка — не чаще раза в 30 минут (через cfg)
+    if not manual and not Updater.shouldCheck() then
+        -- восстановить статус из кэша cfg, если есть
+        if cfg and cfg.lastKnownRemoteVer and cfg.lastKnownRemoteVer ~= "" then
+            local remoteN = Updater.normVer(cfg.lastKnownRemoteVer)
+            local localN  = Updater.normVer(SCRIPT_VER)
+            Updater.localN  = localN
+            Updater.remoteN = remoteN
+            Updater.latest  = remoteN
+            if remoteN == localN or not Updater.verLt(localN, remoteN) then
+                Updater.status = "ok"
+            else
+                Updater.status = "outdated"
+            end
+        end
+        return
+    end
+    Updater.latest = nil
     Updater.err = ""
+    Updater.checking = true
+    Updater.checkingSince = os.time()
+    Updater.status = "checking"
     Updater.dlProg = 0
     local tmp = Updater.tmpDir() .. "/PCStats_upd_ver.txt"
+    -- preferDirect=true: raw.githubusercontent первым (свежее), без purge на check
     Updater.download(Updater.versionUrl(), tmp, function(ok, err)
+        local function cleanup()
+            pcall(os.remove, tmp)
+        end
         if not ok then
             Updater.checking = false
             Updater.status = "error"
             Updater.err = tostring(err or "download")
+            cleanup()
             return
         end
         local raw = Updater.readFile(tmp) or ""
-        pcall(os.remove, tmp)
-        local remote = (raw:match("(%d+[%d%.]*)")) or ""
-        remote = remote:gsub("%s+", "")
-        if remote == "" or raw:lower():find("<html") then
+        cleanup()
+        local remote = Updater.parseVersionText(raw)
+        if not remote then
             Updater.checking = false
             Updater.status = "error"
-            Updater.err = "version.txt пустой или это не версия"
+            Updater.err = "\x76\x65\x72\x73\x69\x6f\x6e\x2e\x74\x78\x74\x20\xed\xe5\x20\xf1\xee\xe4\xe5\xf0\xe6\xe8\xf2\x20\xea\xee\xf0\xf0\xe5\xea\xf2\xed\xf3\xfe\x20\xe2\xe5\xf0\xf1\xe8\xfe"
             return
         end
-        Updater.latest = remote
+        local remoteN = Updater.normVer(remote)
+        local localN  = Updater.normVer(SCRIPT_VER)
+        Updater.latest  = remoteN
+        Updater.remoteN = remoteN
+        Updater.localN  = localN
         Updater.lastCheck = os.time()
-        if remote == tostring(SCRIPT_VER) or not Updater.verLt(SCRIPT_VER, remote) then
+        if cfg then
+            cfg.lastKnownRemoteVer = remoteN
+            cfg.lastCheckTime = os.time()
+            pcall(saveCfg)
+        end
+        if cfg and cfg.debugUpdate then
+            pcall(sampAddChatMessage, "{AAAAAA}[Updater DBG] " ..
+                tostring(Updater.lastUrl or "?") .. " => " .. tostring(remoteN), -1)
+        end
+        if remoteN == localN then
             Updater.checking = false
             Updater.status = "ok"
+            Updater.err = ""
+            return
+        end
+        if not Updater.verLt(localN, remoteN) then
+            -- локальная не меньше удалённой → актуальна (или новее)
+            Updater.checking = false
+            Updater.status = "ok"
+            Updater.err = ""
             return
         end
         Updater.checking = false
         Updater.status = "outdated"
-        -- уведомление (чат + попап) реализовано в notifyUpdateAvailable(),
-        -- которая определена ниже по файлу (после того, как загружены cfg
-        -- и St) — на момент реального вызова (после успешной проверки
-        -- версии, всегда уже во время работы скрипта) она точно объявлена
-        -- как глобальная, так же как pcs_notify/applyCustomChatColor выше.
         if type(notifyUpdateAvailable) == "function" then
-            pcall(notifyUpdateAvailable, remote)
+            pcall(notifyUpdateAvailable, remoteN)
         end
     end, 1, 10000, nil, true, true)
 end
@@ -658,6 +736,14 @@ function Updater.doDownload()
     -- не делает". Для ручной кнопки "Обновить" теперь виден каждый шаг.
     pcall(sampAddChatMessage, "{25AAFF}\x5b\x50\x43\x20\x53\x74\x61\x74\x73\x5d\x20\xce\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe5\x3a\x20\xea\xe0\xf7\xe0\xfe\x2e\x2e\x2e", -1)
     local tmp = Updater.tmpDir() .. "/PCStats_upd_new.lua"
+    do
+        local su = Updater.scriptUrl()
+        local own, rep, br, file = tostring(su):match(
+            "^https?://raw%.githubusercontent%.com/([^/]+)/([^/]+)/([^/]+)/(.+)$")
+        if own then
+            pcall(Updater.purgeJsdelivr, own, rep, br, file)
+        end
+    end
     -- minSize поднят с 2000 до 20000 (реальный размер скрипта — сотни КБ,
     -- 2000 байт легко набиралось ещё до реального завершения закачки),
     -- таймаут — с 12 до 60 секунд (на медленном/троттлящемся канале
@@ -1037,6 +1123,8 @@ local cfg = {
     updatePopupEnabled = true,
     updateVersionUrl = "",
     updateScriptUrl  = "",
+    lastKnownRemoteVer = "",
+    lastCheckTime = 0,
 
     -- Š¼Š°Ń�Ń�Ń‚Š°Š± Ń�Ń€ŠøŃ„Ń‚Š° (0.7 .. 2.0, default 1.0)
     fontSize = 1.25,
@@ -1217,6 +1305,9 @@ local function applyCfgData(m)
     cfg.updatePopupEnabled = toBool(m.updatePopupEnabled, true)
     cfg.updateVersionUrl = tostring(m.updateVersionUrl or "")
     cfg.updateScriptUrl  = tostring(m.updateScriptUrl or "")
+    cfg.lastKnownRemoteVer = tostring(m.lastKnownRemoteVer or "")
+    cfg.lastCheckTime = clampNum(m.lastCheckTime, 0, 99999999999, 0)
+    cfg.debugUpdate = toBool(m.debugUpdate, false)
     cfg.fontSize      = clampNum(m.fontSize, 0.7, 2.0, 1.25)
     cfg.rateAZ        = clampNum(m.rateAZ, 0, 100000000, 35000.0)
     cfg.rateBTC       = clampNum(m.rateBTC, 0, 1e12, 0.0)
@@ -1341,6 +1432,9 @@ local function saveCfg()
             updatePopupEnabled = tostring(cfg.updatePopupEnabled ~= false),
             updateVersionUrl = tostring(cfg.updateVersionUrl or ""),
             updateScriptUrl  = tostring(cfg.updateScriptUrl or ""),
+            lastKnownRemoteVer = tostring(cfg.lastKnownRemoteVer or ""),
+            lastCheckTime = tostring(cfg.lastCheckTime or 0),
+            debugUpdate = tostring(cfg.debugUpdate == true),
             fontSize      = tostring(cfg.fontSize),
             rateAZ        = tostring(cfg.rateAZ),
             rateBTC       = tostring(cfg.rateBTC),
@@ -7596,7 +7690,13 @@ local function drawAboutInner(h)
 
             imgui.SetCursorPos(imgui.ImVec2(SFtext(16), SFtext(32)))
             if us == "ok" then
-                imgui.TextColored(iv4(0.30,0.95,0.40,1.0), u8"\xc0\xea\xf2\xf3\xe0\xeb\xfc\xed\xe0\xff \xe2\xe5\xf0\xf1\xe8\xff")
+                imgui.TextColored(iv4(0.30,0.95,0.40,1.0), u8"\xd3 \xe2\xe0\xf1 \xe0\xea\xf2\xf3\xe0\xeb\xfc\xed\xe0\xff \xe2\xe5\xf0\xf1\xe8\xff")
+                local ln = Updater.localN or Updater.normVer(SCRIPT_VER)
+                local rn = Updater.remoteN or Updater.latest or ln
+                imgui.SetCursorPos(imgui.ImVec2(SFtext(16), SFtext(48)))
+                imgui.TextColored(thDim(),
+                    u8"\xeb\xee\xea\xe0\xeb\xfc\xed\xe0\xff: v" .. tostring(ln) ..
+                    u8"  |  \xf3\xe4\xe0\xeb\xb8\xed\xed\xe0\xff: v" .. tostring(rn))
             elseif us == "checking" then
                 imgui.TextColored(iv4(0.40,0.85,1.0,1.0),
                     u8"\xcf\xf0\xee\xe2\xe5\xf0\xea\xe0... " .. tostring(Updater.dlProg or 0) .. "%")
@@ -9827,8 +9927,8 @@ function main()
                 wait(5000)
                 pcall(function() Updater.check(false) end)
                 while true do
-                    wait(60 * 1000)
-                    if cfg.updateCheckOnStart then
+                    wait(5 * 60 * 1000)
+                    if cfg.updateCheckOnStart and Updater.shouldCheck() then
                         pcall(function() Updater.check(false) end)
                     end
                 end
@@ -9999,7 +10099,7 @@ function main()
             -- этого достаточно), принудительно сбрасываем флаг, чтобы и
             -- ручная кнопка/команда /pcstats_update, и автопроверка каждую
             -- минуту не оставались заблокированными до перезапуска скрипта.
-            if Updater.checking and Updater.checkingSince and (os.time() - Updater.checkingSince) > 25 then
+            if Updater.checking and Updater.checkingSince and (os.time() - Updater.checkingSince) > 45 then
                 Updater.checking = false
                 Updater.status   = "error"
                 Updater.err      = "\xef\xf0\xee\xe2\xe5\xf0\xea\xe0\x20\xe7\xe0\xe2\xe8\xf1\xeb\xe0\x20\x28watchdog\x29"

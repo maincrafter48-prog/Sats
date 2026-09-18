@@ -610,44 +610,53 @@ function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal,
 end
 
 function Updater.check(manual)
-    if Updater.checking then return end
+    -- manual=true (кнопка / /swupd / /pcstats_update): ВСЕГДА свежий HTTP,
+    -- без 30с-кэша и без cfg.lastKnownRemoteVer.
+    -- manual=false (фон): кэш 30 мин через shouldCheck(); UI из cfg только
+    -- если Updater.latest ещё пуст (первый запуск после загрузки скрипта).
     if not Updater.isConfigured() then
         Updater.status = "error"
         Updater.err = "\xed\xe5\x20\xe7\xe0\xe4\xe0\xed\x20\x47\x69\x74\x48\x75\x62\x20\x28\x50\x43\x53\x5f\x47\x48\x5f\x4f\x57\x4e\x45\x52\x20\x2f\x20\x52\x45\x50\x4f\x29"
         return
     end
-    -- D9: ручная кнопка — 30с кэш после успешной проверки
-    if manual and Updater.lastCheck and Updater.lastCheck > 0
-        and (os.time() - Updater.lastCheck) < 30
-        and (Updater.status == "ok" or Updater.status == "outdated")
-        and Updater.localN then
-        return
-    end
-    -- B2: фоновая проверка — не чаще раза в 30 минут (через cfg)
-    if not manual and not Updater.shouldCheck() then
-        -- восстановить статус из кэша cfg, если есть
-        if cfg and cfg.lastKnownRemoteVer and cfg.lastKnownRemoteVer ~= "" then
-            local remoteN = Updater.normVer(cfg.lastKnownRemoteVer)
-            local localN  = Updater.normVer(SCRIPT_VER)
-            Updater.localN  = localN
-            Updater.remoteN = remoteN
-            Updater.latest  = remoteN
-            if remoteN == localN or not Updater.verLt(localN, remoteN) then
-                Updater.status = "ok"
-            else
-                Updater.status = "outdated"
+
+    if not manual then
+        if not Updater.shouldCheck() then
+            -- не дёргать GitHub; восстановить UI из cfg ТОЛЬКО если latest пуст
+            if (not Updater.latest or Updater.latest == "")
+                and cfg and cfg.lastKnownRemoteVer and cfg.lastKnownRemoteVer ~= "" then
+                local remoteN = Updater.normVer(cfg.lastKnownRemoteVer)
+                local localN  = Updater.normVer(SCRIPT_VER)
+                Updater.localN  = localN
+                Updater.remoteN = remoteN
+                Updater.latest  = remoteN
+                if remoteN == localN or not Updater.verLt(localN, remoteN) then
+                    Updater.status = "ok"
+                else
+                    Updater.status = "outdated"
+                end
             end
+            return
         end
-        return
+        -- уже идёт проверка — не стартуем вторую фоновую
+        if Updater.checking then return end
+    else
+        -- ручная: прерываем «залипшую» проверку и запускаем новую
+        Updater.checking = false
     end
-    Updater.latest = nil
-    Updater.err = ""
+
+    -- сброс старых значений, чтобы UI не показывал прошлый remote во время checking
+    Updater.latest   = nil
+    Updater.remoteN  = nil
+    Updater.lastUrl  = nil
+    Updater.err      = ""
     Updater.checking = true
     Updater.checkingSince = os.time()
     Updater.status = "checking"
     Updater.dlProg = 0
+
     local tmp = Updater.tmpDir() .. "/PCStats_upd_ver.txt"
-    -- preferDirect=true: raw.githubusercontent первым (свежее), без purge на check
+    -- preferDirect=true: raw.githubusercontent первым (свежее)
     Updater.download(Updater.versionUrl(), tmp, function(ok, err)
         local function cleanup()
             pcall(os.remove, tmp)
@@ -690,7 +699,7 @@ function Updater.check(manual)
             return
         end
         if not Updater.verLt(localN, remoteN) then
-            -- локальная не меньше удалённой → актуальна (или новее)
+            -- локальная не меньше удалённой → актуальна (или новее репы)
             Updater.checking = false
             Updater.status = "ok"
             Updater.err = ""
@@ -7680,7 +7689,7 @@ local function drawAboutInner(h)
         end
 
         secTitle(u8"\xce\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe5")
-        aboutCard("##updcard", 106, function(aw, ch)
+        aboutCard("##updcard", 118, function(aw, ch)
             imgui.SetWindowFontScale(aboutBaseScale)
             local us  = Updater.status
             local ul  = Updater.latest
@@ -7697,6 +7706,22 @@ local function drawAboutInner(h)
                 imgui.TextColored(thDim(),
                     u8"\xeb\xee\xea\xe0\xeb\xfc\xed\xe0\xff: v" .. tostring(ln) ..
                     u8"  |  \xf3\xe4\xe0\xeb\xb8\xed\xed\xe0\xff: v" .. tostring(rn))
+                do
+                    local tstr = ""
+                    if Updater.lastCheck and Updater.lastCheck > 0 then
+                        tstr = os.date("%H:%M:%S", Updater.lastCheck)
+                    end
+                    local host = ""
+                    if Updater.lastUrl and Updater.lastUrl ~= "" then
+                        host = tostring(Updater.lastUrl):match("^https?://([^/]+)") or ""
+                    end
+                    if tstr ~= "" or host ~= "" then
+                        imgui.SetCursorPos(imgui.ImVec2(SFtext(16), SFtext(64)))
+                        imgui.TextColored(iv4(0.45,0.50,0.58,1.0),
+                            u8"\xef\xf0\xee\xe2\xe5\xf0\xea\xe0: " .. tstr ..
+                            (host ~= "" and (u8"  \xe8\xf1\xf2\xee\xf7\xed\xe8\xea: " .. host) or ""))
+                    end
+                end
             elseif us == "checking" then
                 imgui.TextColored(iv4(0.40,0.85,1.0,1.0),
                     u8"\xcf\xf0\xee\xe2\xe5\xf0\xea\xe0... " .. tostring(Updater.dlProg or 0) .. "%")

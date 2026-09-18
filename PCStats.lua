@@ -1,7 +1,7 @@
 script_name("PC Stats")
 script_description("Statistika personazha | Arizona PC | by Marco_Santiago (PC port)")
 script_author("Marco_Santiago")
-script_version("1.8.8")
+script_version("1.8.9")
 
 local SCRIPT_VER = "1.8.9"
 

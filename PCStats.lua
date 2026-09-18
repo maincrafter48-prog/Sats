@@ -246,7 +246,6 @@ PCS_GH_REPO   = "Sats"
 PCS_GH_BRANCH = "main"
 PCS_GH_VER_FILE = "version.txt"
 PCS_GH_LUA_FILE = "PCStats.lua"
-PCS_GH_SHA_FILE = "sha256.txt"
 
 Updater = Updater or {
     checking = false,
@@ -274,15 +273,6 @@ function Updater.scriptUrl()
     return string.format(
         "https://raw.githubusercontent.com/%s/%s/%s/%s",
         PCS_GH_OWNER, PCS_GH_REPO, PCS_GH_BRANCH, PCS_GH_LUA_FILE)
-end
-
-function Updater.shaUrl()
-    if cfg and cfg.updateShaUrl and cfg.updateShaUrl ~= "" then
-        return tostring(cfg.updateShaUrl)
-    end
-    return string.format(
-        "https://raw.githubusercontent.com/%s/%s/%s/%s",
-        PCS_GH_OWNER, PCS_GH_REPO, PCS_GH_BRANCH, PCS_GH_SHA_FILE)
 end
 
 function Updater.isConfigured()
@@ -320,6 +310,13 @@ function Updater.normVer(s)
 end
 
 -- строгий разбор version.txt (не HTML/404/мусор)
+-- ФИКС ("version.txt не содержит корректную версию" даже когда версия
+-- в файле есть, но строка не состоит ИЗ НЕЁ ОДНОЙ — например случайные
+-- кавычки вокруг числа, "Version: 1.8.9", лишний пробел/таб перед
+-- числом): сначала пробуем строгий формат (вся строка = версия), если
+-- не вышло — ищем номер версии где угодно в первой строке. Возвращает
+-- второй результат — саму проверяемую строку (для диагностики в
+-- сообщении об ошибке, если версия так и не нашлась).
 function Updater.parseVersionText(raw)
     raw = tostring(raw or "")
     raw = raw:gsub("^\239\187\191", "")  -- UTF-8 BOM
@@ -327,20 +324,25 @@ function Updater.parseVersionText(raw)
     local line = raw:match("([^\r\n]+)") or raw
     line = line:gsub("^%s+", ""):gsub("%s+$", "")
     line = line:gsub("\194\160", "")
-    if line == "" then return nil end
+    line = line:gsub("^['\"]", ""):gsub("['\"]$", "") -- случайные кавычки вокруг версии
+    if line == "" then return nil, "" end
     local low = line:lower()
     if low:find("<html", 1, true) or low:find("<!doctype", 1, true) then
-        return nil
+        return nil, line
     end
     local remote = line:match("^[vV]?(%d+(%.%d+)+)$")
-    if not remote then return nil end
-    return remote
+    if remote then return remote, line end
+    remote = line:match("(%d+%.%d+%.%d+)") or line:match("(%d+%.%d+)")
+    if remote then return remote, line end
+    return nil, line
 end
 
 function Updater.shouldCheck()
     local lastT = 0
     if cfg then lastT = tonumber(cfg.lastCheckTime) or 0 end
-    if lastT > 0 and (os.time() - lastT) < (30 * 60) then return false end
+    -- по просьбе: автопроверка раз в минуту (было — раз в 30 минут),
+    -- чтобы новая версия на GitHub обнаруживалась почти сразу
+    if lastT > 0 and (os.time() - lastT) < 60 then return false end
     return true
 end
 
@@ -569,18 +571,6 @@ function Updater.fetch(url, dest, timeoutMs, minSize, estimatedTotal)
     return true, nil
 end
 
--- ФИКС ("зеркало висит — проверка/закачка тянется 10-30 секунд"):
--- раньше зеркала перебирались ПОСЛЕДОВАТЕЛЬНО (jsDelivr -> raw ->
--- githack), и если первое в списке зависало на полном таймауте —
--- следующее даже не начинало качаться, пока не истечёт время первого.
--- Теперь все зеркала запускаются ОДНОВРЕМЕННО, каждое в своём потоке
--- и со своим временным файлом (.partN), и побеждает то, что первым
--- вернулось успешно — остальные результаты просто отбрасываются.
--- ФИКС ("автопроверка раз в минуту перестаёт работать"): всё тело
--- по-прежнему обёрнуто в pcall — если Updater.fetch (или сам wait())
--- кидает непойманную ошибку, onDone(false, ...) всё равно вызывается,
--- и Updater.checking (сбрасывается только внутри onDone — см.
--- Updater.check) не залипает в true навсегда.
 function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal, cacheBust, preferDirect)
     url = tostring(url or ""); dest = tostring(dest or "")
     timeoutMs = tonumber(timeoutMs) or 12000
@@ -595,45 +585,35 @@ function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal,
         return
     end
     lua_thread.create(function()
+        -- ФИКС ("автопроверка раз в минуту перестаёт работать"): раньше
+        -- тело потока ничем не было защищено — если Updater.fetch (или
+        -- purgeJsdelivr, или сам wait()) кидал непойманную ошибку
+        -- (обрыв сети, странный ответ downloadUrlToFile и т.п.), поток
+        -- просто молча умирал и onDone(...) не вызывался вообще. Так как
+        -- Updater.checking сбрасывается в false ТОЛЬКО внутри onDone
+        -- (см. Updater.check), один такой сбой намертво "залипал"
+        -- Updater.checking = true — и все дальнейшие проверки (и
+        -- автоматическая раз в минуту, и ручная кнопка/команда
+        -- /pcstats_update) переставали что-либо делать до перезапуска
+        -- скрипта. Теперь всё тело обёрнуто в pcall, и при ошибке
+        -- onDone(false, ...) вызывается в любом случае.
         local okThread, errThread = pcall(function()
-            local result   = { done = false, ok = false, err = nil, url = nil }
-            local finished = 0
-            local perTimeout = math.min(timeoutMs, 5000)
-
+            -- purge.jsdelivr только при скачивании .lua (см. doDownload),
+            -- не при каждой проверке version.txt
+            local lastErr = "fail"
             for i = 1, #urls do
-                lua_thread.create(function(idx)
-                    local tmpDest = dest .. ".part" .. tostring(idx)
-                    local ok, err = Updater.fetch(urls[idx], tmpDest, perTimeout, minSize, estimatedTotal)
-                    finished = finished + 1
-                    if not result.done then
-                        if ok then
-                            result.done = true
-                            result.ok   = true
-                            result.url  = urls[idx]
-                            pcall(os.remove, dest)
-                            pcall(os.rename, tmpDest, dest)
-                        else
-                            result.err = result.err or (tostring(err or "fail") ..
-                                " [" .. (tostring(urls[idx]):match("^https?://([^/]+)") or "?") .. "]")
-                        end
-                    end
-                    pcall(os.remove, tmpDest)
-                end, i)
+                Updater.dlProg = 0
+                local ok, err = Updater.fetch(urls[i], dest, timeoutMs, minSize, estimatedTotal)
+                if ok then
+                    Updater.lastUrl = urls[i]
+                    Updater.dlProg  = 100
+                    if onDone then onDone(true, nil) end
+                    return
+                end
+                lastErr = tostring(err or "fail") .. " [" .. (tostring(urls[i]):match("^https?://([^/]+)") or "?") .. "]"
+                wait(200)
             end
-
-            local waited   = 0
-            local waitMax  = perTimeout + 2000
-            while not result.done and finished < #urls and waited < waitMax do
-                wait(100); waited = waited + 100
-            end
-
-            if result.ok then
-                Updater.lastUrl = result.url
-                Updater.dlProg  = 100
-                if onDone then onDone(true, nil) end
-            else
-                if onDone then onDone(false, result.err or "все зеркала недоступны") end
-            end
+            if onDone then onDone(false, lastErr) end
         end)
         if not okThread then
             if onDone then onDone(false, "внутренняя ошибка: " .. tostring(errThread)) end
@@ -642,53 +622,53 @@ function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal,
 end
 
 function Updater.check(manual)
-    -- ФИКС "ручная проверка показывает старую версию": раньше при
-    -- manual=true повторный вызов, пока Updater.checking всё ещё true,
-    -- просто выходил (return), а отдельный 30-секундный кэш ниже (D9)
-    -- вообще не давал ручной кнопке дойти до реального запроса к
-    -- GitHub — игрок видел ЗАКЭШИРОВАННОЕ значение, даже нажимая
-    -- "Проверить". Теперь ручной вызов принудительно сбрасывает флаг
-    -- Updater.checking (если завис/ещё идёт) и всегда доходит до
-    -- реального запроса; D9-кэш убран полностью.
-    if Updater.checking then
-        if not manual then return end
-        Updater.checking = false
-    end
+    -- manual=true (кнопка / /swupd / /pcstats_update): ВСЕГДА свежий HTTP,
+    -- без 30с-кэша и без cfg.lastKnownRemoteVer.
+    -- manual=false (фон): кэш 30 мин через shouldCheck(); UI из cfg только
+    -- если Updater.latest ещё пуст (первый запуск после загрузки скрипта).
     if not Updater.isConfigured() then
         Updater.status = "error"
         Updater.err = "\xed\xe5\x20\xe7\xe0\xe4\xe0\xed\x20\x47\x69\x74\x48\x75\x62\x20\x28\x50\x43\x53\x5f\x47\x48\x5f\x4f\x57\x4e\x45\x52\x20\x2f\x20\x52\x45\x50\x4f\x29"
         return
     end
-    -- B2: фоновая проверка — не чаще раза в 30 минут (через cfg)
-    if not manual and not Updater.shouldCheck() then
-        -- восстановить статус из кэша cfg, если есть
-        if cfg and cfg.lastKnownRemoteVer and cfg.lastKnownRemoteVer ~= "" then
-            local remoteN = Updater.normVer(cfg.lastKnownRemoteVer)
-            local localN  = Updater.normVer(SCRIPT_VER)
-            Updater.localN  = localN
-            Updater.remoteN = remoteN
-            Updater.latest  = remoteN
-            if remoteN == localN or not Updater.verLt(localN, remoteN) then
-                Updater.status = "ok"
-            else
-                Updater.status = "outdated"
+
+    if not manual then
+        if not Updater.shouldCheck() then
+            -- не дёргать GitHub; восстановить UI из cfg ТОЛЬКО если latest пуст
+            if (not Updater.latest or Updater.latest == "")
+                and cfg and cfg.lastKnownRemoteVer and cfg.lastKnownRemoteVer ~= "" then
+                local remoteN = Updater.normVer(cfg.lastKnownRemoteVer)
+                local localN  = Updater.normVer(SCRIPT_VER)
+                Updater.localN  = localN
+                Updater.remoteN = remoteN
+                Updater.latest  = remoteN
+                if remoteN == localN or not Updater.verLt(localN, remoteN) then
+                    Updater.status = "ok"
+                else
+                    Updater.status = "outdated"
+                end
             end
+            return
         end
-        return
+        -- уже идёт проверка — не стартуем вторую фоновую
+        if Updater.checking then return end
+    else
+        -- ручная: прерываем «залипшую» проверку и запускаем новую
+        Updater.checking = false
     end
-    -- явный сброс перед новым запросом — чтобы в UI не мелькало старое
-    -- значение, пока идёт проверка, и по завершении отображалось только
-    -- то, что реально пришло с GitHub только что
+
+    -- сброс старых значений, чтобы UI не показывал прошлый remote во время checking
     Updater.latest   = nil
     Updater.remoteN  = nil
     Updater.lastUrl  = nil
     Updater.err      = ""
     Updater.checking = true
     Updater.checkingSince = os.time()
-    Updater.status   = "checking"
-    Updater.dlProg   = 0
+    Updater.status = "checking"
+    Updater.dlProg = 0
+
     local tmp = Updater.tmpDir() .. "/PCStats_upd_ver.txt"
-    -- preferDirect=true: raw.githubusercontent первым (свежее), без purge на check
+    -- preferDirect=true: raw.githubusercontent первым (свежее)
     Updater.download(Updater.versionUrl(), tmp, function(ok, err)
         local function cleanup()
             pcall(os.remove, tmp)
@@ -702,11 +682,21 @@ function Updater.check(manual)
         end
         local raw = Updater.readFile(tmp) or ""
         cleanup()
-        local remote = Updater.parseVersionText(raw)
+        local remote, rawLine = Updater.parseVersionText(raw)
         if not remote then
             Updater.checking = false
             Updater.status = "error"
-            Updater.err = "\x76\x65\x72\x73\x69\x6f\x6e\x2e\x74\x78\x74\x20\xed\xe5\x20\xf1\xee\xe4\xe5\xf0\xe6\xe8\xf2\x20\xea\xee\xf0\xf0\xe5\xea\xf2\xed\xf3\xfe\x20\xe2\xe5\xf0\xf1\xe8\xfe"
+            -- ФИКС: раньше сообщение об ошибке не показывало, ЧТО именно
+            -- пришло с GitHub вместо версии — снаружи было непонятно, то
+            -- ли файл version.txt пустой, то ли CDN отдал 404/HTML, то ли
+            -- в файле опечатка. Теперь в текст ошибки добавляется сама
+            -- полученная строка (безопасно очищенная от посторонних
+            -- байтов, до 60 символов) — видно прямо во вкладке "О скрипте".
+            local snippet = tostring(rawLine or ""):gsub("[^%w%.%-%: ]", "?")
+            if snippet == "" then snippet = "\xef\xf3\xf1\xf2\xee" end -- "пусто"
+            if #snippet > 60 then snippet = snippet:sub(1, 60) .. "..." end
+            Updater.err = "\x76\x65\x72\x73\x69\x6f\x6e\x2e\x74\x78\x74\x20\xed\xe5\x20\xf1\xee\xe4\xe5\xf0\xe6\xe8\xf2\x20\xea\xee\xf0\xf0\xe5\xea\xf2\xed\xf3\xfe\x20\xe2\xe5\xf0\xf1\xe8\xfe" ..
+                " [" .. snippet .. "]"
             return
         end
         local remoteN = Updater.normVer(remote)
@@ -724,17 +714,20 @@ function Updater.check(manual)
             pcall(sampAddChatMessage, "{AAAAAA}[Updater DBG] " ..
                 tostring(Updater.lastUrl or "?") .. " => " .. tostring(remoteN), -1)
         end
-        if remoteN == localN then
+        if remoteN == localN or not Updater.verLt(localN, remoteN) then
+            -- localN == remoteN, либо локальная новее repo → актуальна
             Updater.checking = false
             Updater.status = "ok"
             Updater.err = ""
-            return
-        end
-        if not Updater.verLt(localN, remoteN) then
-            -- локальная не меньше удалённой → актуальна (или новее)
-            Updater.checking = false
-            Updater.status = "ok"
-            Updater.err = ""
+            -- по просьбе: если это РУЧНАЯ проверка (кнопка "Проверить" /
+            -- команды /pcstats_update, /swupd) — явно написать в чат, что
+            -- версия актуальна. Фоновая (ежеминутная) проверка молчит при
+            -- совпадении версий, чтобы не спамить чат каждую минуту.
+            if manual then
+                pcall(sampAddChatMessage, "{00FF88}[PC Stats] " ..
+                    "\xd3\x20\xe2\xe0\xf1\x20\xe0\xea\xf2\xf3\xe0\xeb\xfc\xed\xe0\xff\x20\xe2\xe5\xf0\xf1\xe8\xff\x20\x76" ..
+                    tostring(localN), -1)
+            end
             return
         end
         Updater.checking = false
@@ -743,88 +736,6 @@ function Updater.check(manual)
             pcall(notifyUpdateAvailable, remoteN)
         end
     end, 1, 10000, nil, true, true)
-end
-
--- качает sha256.txt (одна строка — hex SHA256 от PCStats.lua на GitHub)
--- через те же зеркала. Если файла ещё нет в репозитории — возвращает
--- nil, и проверка целостности ниже просто пропускается (обратная
--- совместимость: без sha256.txt всё работает как раньше).
-function Updater.fetchExpectedSha()
-    local tmp = Updater.tmpDir() .. "/PCStats_upd_sha.txt"
-    local ok  = false
-    local urls = Updater.candidates(Updater.shaUrl(), true, true)
-    for _, u in ipairs(urls) do
-        local o, _ = Updater.fetch(u, tmp, 5000, 4, 0)
-        if o then ok = true; break end
-    end
-    if not ok then return nil end
-    local raw = Updater.readFile(tmp) or ""
-    pcall(os.remove, tmp)
-    local hex = tostring(raw):match("^%s*([a-fA-F0-9]+)%s*$")
-    if not hex or #hex ~= 64 then return nil end
-    return hex:lower()
-end
-
--- SHA256 через WinAPI CryptoAPI (advapi32) поверх ffi — без внешних
--- зависимостей. Если ffi недоступен (не Windows/старый MoonLoader) —
--- возвращает nil, и проверка целостности по хешу пропускается (файл
--- всё равно уже проверяется на компилируемость ниже по doDownload).
-function Updater.sha256(data)
-    if type(data) ~= "string" or data == "" then return nil end
-    if not ffi then return nil end
-
-    if not Updater._shaCdefDone then
-        Updater._shaCdefDone = true
-        pcall(ffi.cdef, [[
-            int CryptAcquireContextA(void **phProv, const char *pszContainer,
-                                     const char *pszProvider, unsigned int dwProvType,
-                                     unsigned int dwFlags);
-            int CryptCreateHash(void *hProv, unsigned int Algid, void *hKey,
-                                unsigned int dwFlags, void **phHash);
-            int CryptHashData(void *hHash, const unsigned char *pbData,
-                              unsigned int dwDataLen, unsigned int dwFlags);
-            int CryptGetHashParam(void *hHash, unsigned int dwParam,
-                                  unsigned char *pbData, unsigned int *pdwDataLen,
-                                  unsigned int dwFlags);
-            int CryptDestroyHash(void *hHash);
-            int CryptReleaseContext(void *hProv, unsigned int dwFlags);
-        ]])
-    end
-
-    local advapi = nil
-    pcall(function() advapi = ffi.load("advapi32") end)
-    if not advapi then return nil end
-
-    local hProv, hHash = ffi.new("void*[1]"), ffi.new("void*[1]")
-    local ok1 = advapi.CryptAcquireContextA(hProv, nil, nil, 24, 0xF0000000)
-    if ok1 == 0 then return nil end
-
-    local ok2 = advapi.CryptCreateHash(hProv[0], 0x0000800c, nil, 0, hHash)
-    if ok2 == 0 then
-        advapi.CryptReleaseContext(hProv[0], 0)
-        return nil
-    end
-
-    local ok3 = advapi.CryptHashData(hHash[0], data, #data, 0)
-    if ok3 == 0 then
-        advapi.CryptDestroyHash(hHash[0])
-        advapi.CryptReleaseContext(hProv[0], 0)
-        return nil
-    end
-
-    local buf  = ffi.new("unsigned char[32]")
-    local blen = ffi.new("unsigned int[1]", 32)
-    local ok4 = advapi.CryptGetHashParam(hHash[0], 0x0002, buf, blen, 0)
-
-    advapi.CryptDestroyHash(hHash[0])
-    advapi.CryptReleaseContext(hProv[0], 0)
-    if ok4 == 0 then return nil end
-
-    local hex = {}
-    for i = 0, 31 do
-        hex[#hex + 1] = string.format("%02x", buf[i])
-    end
-    return table.concat(hex)
 end
 
 function Updater.doDownload()
@@ -859,11 +770,14 @@ function Updater.doDownload()
     -- не делает". Для ручной кнопки "Обновить" теперь виден каждый шаг.
     pcall(sampAddChatMessage, "{25AAFF}\x5b\x50\x43\x20\x53\x74\x61\x74\x73\x5d\x20\xce\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe5\x3a\x20\xea\xe0\xf7\xe0\xfe\x2e\x2e\x2e", -1)
     local tmp = Updater.tmpDir() .. "/PCStats_upd_new.lua"
-    -- ФИКС: purge.jsdelivr раньше дёргался перед каждой закачкой (лишний
-    -- HTTP-запрос + фиксированные 700мс ожидания), хотя cacheBust-параметр
-    -- (?_cb=...) в самом URL уже делает каждый запрос "уникальным" для
-    -- CDN — тот физически не может отдать старый закэшированный ответ.
-    -- Explicit purge больше не нужен, убран.
+    do
+        local su = Updater.scriptUrl()
+        local own, rep, br, file = tostring(su):match(
+            "^https?://raw%.githubusercontent%.com/([^/]+)/([^/]+)/([^/]+)/(.+)$")
+        if own then
+            pcall(Updater.purgeJsdelivr, own, rep, br, file)
+        end
+    end
     -- minSize поднят с 2000 до 20000 (реальный размер скрипта — сотни КБ,
     -- 2000 байт легко набиралось ещё до реального завершения закачки),
     -- таймаут — с 12 до 60 секунд (на медленном/троттлящемся канале
@@ -913,25 +827,6 @@ function Updater.doDownload()
         -- по просьбе: предупреждение "ВНИМАНИЕ: скачанный файл сообщает
         -- версию vX, хотя version.txt говорит vY..." убрано полностью —
         -- обновление в любом случае ставится как есть
-        -- Проверка целостности: SHA256 скачанного файла должен совпасть
-        -- с sha256.txt из репозитория. Если CDN отдал обрезанный/битый
-        -- файл — компиляция (проверка выше) не всегда это ловит (валидный
-        -- по синтаксису, но не тот файл), поэтому сверяем ещё и хеш.
-        -- Если sha256.txt отсутствует на GitHub — проверка пропускается,
-        -- всё работает как раньше (обратная совместимость).
-        local expectedSha = Updater.fetchExpectedSha()
-        if expectedSha then
-            local actualSha = Updater.sha256(body)
-            if actualSha and actualSha ~= expectedSha then
-                Updater.dlState = "error"
-                Updater.err = "SHA256 не совпал"
-                pcall(os.remove, tmp)
-                pcall(sampAddChatMessage, "{FF6666}[PC Stats] " ..
-                    "\xee\xf8\xe8\xe1\xea\xe0\x20\xee\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xff\x3a\x20" ..
-                    "\xf4\xe0\xe9\xeb\x20\xef\xee\xe2\xf0\xe5\xe6\xe4\xb8\xed\x20\x28SHA256\x29", -1)
-                return
-            end
-        end
         -- backup
         pcall(function()
             local old = Updater.readFile(path)
@@ -7819,7 +7714,7 @@ local function drawAboutInner(h)
         end
 
         secTitle(u8"\xce\xe1\xed\xee\xe2\xeb\xe5\xed\xe8\xe5")
-        aboutCard("##updcard", 106, function(aw, ch)
+        aboutCard("##updcard", 118, function(aw, ch)
             imgui.SetWindowFontScale(aboutBaseScale)
             local us  = Updater.status
             local ul  = Updater.latest
@@ -7836,6 +7731,22 @@ local function drawAboutInner(h)
                 imgui.TextColored(thDim(),
                     u8"\xeb\xee\xea\xe0\xeb\xfc\xed\xe0\xff: v" .. tostring(ln) ..
                     u8"  |  \xf3\xe4\xe0\xeb\xb8\xed\xed\xe0\xff: v" .. tostring(rn))
+                do
+                    local tstr = ""
+                    if Updater.lastCheck and Updater.lastCheck > 0 then
+                        tstr = os.date("%H:%M:%S", Updater.lastCheck)
+                    end
+                    local host = ""
+                    if Updater.lastUrl and Updater.lastUrl ~= "" then
+                        host = tostring(Updater.lastUrl):match("^https?://([^/]+)") or ""
+                    end
+                    if tstr ~= "" or host ~= "" then
+                        imgui.SetCursorPos(imgui.ImVec2(SFtext(16), SFtext(64)))
+                        imgui.TextColored(iv4(0.45,0.50,0.58,1.0),
+                            u8"\xef\xf0\xee\xe2\xe5\xf0\xea\xe0: " .. tstr ..
+                            (host ~= "" and (u8"  \xe8\xf1\xf2\xee\xf7\xed\xe8\xea: " .. host) or ""))
+                    end
+                end
             elseif us == "checking" then
                 imgui.TextColored(iv4(0.40,0.85,1.0,1.0),
                     u8"\xcf\xf0\xee\xe2\xe5\xf0\xea\xe0... " .. tostring(Updater.dlProg or 0) .. "%")
@@ -10055,8 +9966,9 @@ function main()
             -- если игрок сидел в игре часами, ничего больше не
             -- проверялось. Теперь это постоянный цикл: первая проверка —
             -- вскоре после спавна (тот самый "при входе"), а дальше —
-            -- каждую МИНУТУ, пока сессия активна (по просьбе — раньше
-            -- было раз в час), чтобы новая версия обнаруживалась
+            -- каждую МИНУТУ, пока сессия активна (сам цикл тикает раз в
+            -- минуту, и Updater.shouldCheck() тоже пускает не чаще раза
+            -- в минуту — см. выше), чтобы новая версия обнаруживалась
             -- практически сразу после публикации на GitHub. Сам чат
             -- + попап при этом не спамят каждую минуту одним и тем же —
             -- повтор не чаще раза в час на одну и ту же версию
@@ -10066,7 +9978,7 @@ function main()
                 wait(5000)
                 pcall(function() Updater.check(false) end)
                 while true do
-                    wait(5 * 60 * 1000)
+                    wait(60 * 1000)
                     if cfg.updateCheckOnStart and Updater.shouldCheck() then
                         pcall(function() Updater.check(false) end)
                     end
@@ -10233,14 +10145,12 @@ function main()
 
             -- ФИКС ("автопроверка версии раз в минуту перестаёт работать"):
             -- тот же watchdog-паттерн, что и у _phoneOpBusy выше — если
-            -- Updater.checking залип дольше 20 секунд, принудительно
-            -- сбрасываем флаг. Порог снижен с 45 до 20 секунд: зеркала
-            -- теперь качаются ПАРАЛЛЕЛЬНО (см. Updater.download), а не
-            -- по очереди, поэтому вся проверка завершается за ~5-7 секунд
-            -- даже если одно из зеркал зависло — 20 секунд достаточно
-            -- с запасом, и застрявший флаг больше не держит UI и
-            -- автопроверку заблокированными лишние 25+ секунд.
-            if Updater.checking and Updater.checkingSince and (os.time() - Updater.checkingSince) > 20 then
+            -- Updater.checking залип дольше 25 секунд (сам Updater.download
+            -- работает с таймаутом 10с на URL, плюс до 4 зеркал — с запасом
+            -- этого достаточно), принудительно сбрасываем флаг, чтобы и
+            -- ручная кнопка/команда /pcstats_update, и автопроверка каждую
+            -- минуту не оставались заблокированными до перезапуска скрипта.
+            if Updater.checking and Updater.checkingSince and (os.time() - Updater.checkingSince) > 45 then
                 Updater.checking = false
                 Updater.status   = "error"
                 Updater.err      = "\xef\xf0\xee\xe2\xe5\xf0\xea\xe0\x20\xe7\xe0\xe2\xe8\xf1\xeb\xe0\x20\x28watchdog\x29"

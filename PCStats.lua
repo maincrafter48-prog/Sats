@@ -3,7 +3,7 @@ script_description("Statistika personazha | Arizona PC | by Marco_Santiago (PC p
 script_author("Marco_Santiago")
 script_version("1.8.8")
 
-local SCRIPT_VER = "1.8.8"
+local SCRIPT_VER = "1.8.9"
 
 -- имя чат-команды, зарегистрированной сейчас (для перерегистрации при смене)
 local _registeredMenuCmd = nil
@@ -3885,6 +3885,44 @@ local function openTaxAppDirect()
 end
 
 -- ============================================================
+--  ХРАНЕНИЕ ЛОГОВ (по просьбе): и лог оплат налогов (TX ниже), и лог
+--  дохода PayDay/депозита (PD дальше по файлу) хранятся не вечно, а
+--  только последние LOG_RETENTION_DAYS дней — при каждой загрузке лога
+--  и при каждой новой записи более старые строки удаляются и из памяти
+--  (St.taxEntries / St.incomeEntries), и из файла на диске. Оба лога
+--  лежат в CFG_DIR (moonloader/config/PCStats/...), то есть в отдельных
+--  файлах, а не в самом .lua — поэтому переживают обновление скрипта
+--  (Updater.doDownload перезаписывает только сам .lua) и видны сразу
+--  после обновления как ни в чём не бывало.
+-- ============================================================
+-- ФИКС "more than 200 local variables": объявлены глобальными (без local),
+-- как и notifyUpdateAvailable/drawUpdateAvailablePopup ниже по файлу —
+-- файл уже близок к лимиту Lua 5.1 в 200 локальных переменных верхнего
+-- уровня, лишние локальные здесь были бы избыточны.
+LOG_RETENTION_DAYS = 30
+
+-- переводит дату "YYYY-MM-DD" (как её пишут TX/PD) в os.time() на полдень
+-- этого дня — возвращает nil, если строка не распознана как дата
+function pcs_dateToEpoch(dateStr)
+    if type(dateStr) ~= "string" then return nil end
+    local y, m, d = dateStr:match("^(%d%d%d%d)-(%d%d)-(%d%d)$")
+    if not y then return nil end
+    local ok, t = pcall(os.time, {
+        year = tonumber(y), month = tonumber(m), day = tonumber(d), hour = 12,
+    })
+    if ok and type(t) == "number" then return t end
+    return nil
+end
+
+-- true, если запись с такой датой не старше maxDays дней (нераспознанную
+-- дату не трогаем — считаем свежей, чтобы битая строка не удаляла лог)
+function pcs_isEntryFresh(dateStr, maxDays)
+    local ep = pcs_dateToEpoch(dateStr)
+    if not ep then return true end
+    return (os.time() - ep) <= (maxDays * 86400)
+end
+
+-- ============================================================
 --  ЛОГ ОПЛАТ НАЛОГОВ (по просьбе: свой персистентный лог + календарь,
 --  тем же способом, что и лог дохода PayDay — см. таблицу PD ниже) ──
 -- ============================================================
@@ -3932,6 +3970,36 @@ function TX.loadLog()
         end
     end
     St.taxLogLoaded = true
+    TX.pruneOld()
+end
+
+-- убирает из St.taxEntries (и, если что-то реально удалено, перезаписывает
+-- сам файл на диске) записи старше LOG_RETENTION_DAYS дней — вызывается и
+-- при загрузке лога, и при каждой новой записи, так что старьё чистится
+-- само, без ручных действий
+function TX.pruneOld()
+    local removed = false
+    for i = #St.taxEntries, 1, -1 do
+        if not pcs_isEntryFresh(St.taxEntries[i].date, LOG_RETENTION_DAYS) then
+            table.remove(St.taxEntries, i)
+            removed = true
+        end
+    end
+    if not removed then return end
+    pcall(function()
+        ensureCfgDir()
+        local out = io.open(TX.LOG_FILE, "w")
+        if out then
+            -- St.taxEntries хранит новые сверху — на диске пишем в
+            -- хронологическом порядке (как и раньше делал append)
+            for i = #St.taxEntries, 1, -1 do
+                local e = St.taxEntries[i]
+                out:write(e.date .. "|" .. e.time .. "|" .. e.amount .. "|" ..
+                    (e.auto and "1" or "0") .. "|" .. (e.noTax and "1" or "0") .. "\n")
+            end
+            out:close()
+        end
+    end)
 end
 
 -- добавляет одну запись об оплате налогов (или отметку "налогов не было",
@@ -3955,6 +4023,7 @@ function TX.addEntry(isAuto, amount, isNoTax)
             f:close()
         end
     end)
+    TX.pruneOld()
 end
 
 -- фиксирует успешную оплату (своей учётки), обновляет время/сумму последней оплаты
@@ -4022,7 +4091,23 @@ end
 
 -- запускает оплату: открывает телефон/приложение и переводит state-машину
 -- в режим ожидания (см. tax-блок внутри sampev.onShowDialog ниже)
+-- ФИКС (по просьбе): жёсткая нижняя граница между двумя автооплатами —
+-- 1 час, НЕЗАВИСИМО от cfg.taxAutoIntervalHours и от того, что именно
+-- запустило оплату (таймер автооплаты, оплата при входе). Раньше при
+-- перезапуске скрипта (например, сразу после самообновления через
+-- Updater.doDownload) поток "оплата при входе" стартовал заново и мог
+-- решить, что налоги нужно оплатить снова, если что-то в его собственных
+-- флагах (не в cfg — cfg переживает обновление) сбилось. Эта проверка —
+-- финальная страховка внутри самой payTaxesNow, а не только в потоке,
+-- который её вызывает.
+TAX_MIN_REPAY_SEC = 3600 -- глобальная (см. фикс "200 local variables" выше)
 local function payTaxesNow(isAuto)
+    if isAuto and cfg.taxLastPayTime and cfg.taxLastPayTime ~= 0
+        and (os.time() - cfg.taxLastPayTime) < TAX_MIN_REPAY_SEC then
+        -- налоги уже точно оплачивались меньше часа назад — тихо
+        -- пропускаем, не открывая телефон и не трогая _taxState
+        return
+    end
     if _taxState ~= 0 then
         if not isAuto then
             pcall(sampAddChatMessage, "{FF6666}[PC Stats] " ..
@@ -4306,6 +4391,33 @@ function PD.loadIncomeLog()
         end
     end
     St.incomeLoaded = true
+    PD.pruneOldIncome()
+end
+
+-- убирает из St.incomeEntries (зарплата/депозит/акции/АЗ) записи старше
+-- LOG_RETENTION_DAYS дней, и если что-то удалено — перезаписывает файл
+-- на диске (см. TX.pruneOld выше, та же логика для лога налогов)
+function PD.pruneOldIncome()
+    local removed = false
+    for i = #St.incomeEntries, 1, -1 do
+        if not pcs_isEntryFresh(St.incomeEntries[i].date, LOG_RETENTION_DAYS) then
+            table.remove(St.incomeEntries, i)
+            removed = true
+        end
+    end
+    if not removed then return end
+    pcall(function()
+        ensureCfgDir()
+        local out = io.open(PD.LOG_FILE, "w")
+        if out then
+            for i = #St.incomeEntries, 1, -1 do
+                local e = St.incomeEntries[i]
+                out:write(e.date .. "|" .. e.time .. "|" .. e.salary .. "|" ..
+                    e.deposit .. "|" .. e.aksy .. "|" .. e.az .. "\n")
+            end
+            out:close()
+        end
+    end)
 end
 
 -- добавляет одну запись PayDay: сохраняет в память (сверху списка),
@@ -4358,6 +4470,7 @@ function PD.addIncomeEntry(salary, deposit, aksy, az)
             f:close()
         end
     end)
+    PD.pruneOldIncome()
 end
 
 -- разбирает одну строку чата как часть блока PayDay; возвращает true,
@@ -9777,7 +9890,7 @@ function main()
                 -- что и у "Автооплата"), значит налоги уже точно оплачены
                 -- за этот период — не платим ещё раз просто потому, что
                 -- игрок зашёл/перезашёл в игру ──
-                local intervalSec = math.max(1, tonumber(cfg.taxAutoIntervalHours) or 1) * 3600
+                local intervalSec = math.max(TAX_MIN_REPAY_SEC, (tonumber(cfg.taxAutoIntervalHours) or 1) * 3600)
                 local recentlyPaid = cfg.taxLastPayTime ~= 0
                     and (os.time() - cfg.taxLastPayTime) < intervalSec
                 if recentlyPaid then

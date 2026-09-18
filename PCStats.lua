@@ -571,7 +571,19 @@ function Updater.fetch(url, dest, timeoutMs, minSize, estimatedTotal)
     return true, nil
 end
 
-function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal, cacheBust, preferDirect)
+-- ФИКС ("изменил версию на GitHub — проверка всё равно показывает
+-- старую, хотя version.txt на GitHub точно новый"): direct
+-- raw.githubusercontent.com — это тоже CDN (Fastly) со своим кэшем на
+-- СТОРОНЕ GITHUB, который иногда держит старое содержимое ОТ НЕСКОЛЬКИХ
+-- МИНУТ ДО ЧАСОВ после коммита — и у него, в отличие от jsDelivr, НЕТ
+-- публичного API принудительного сброса. Поэтому cacheBust-параметр в
+-- URL (?_cb=...) НЕ гарантирует свежий ответ именно от raw напрямую —
+-- это известная и часто воспроизводимая проблема самого GitHub, не
+-- скрипта. У jsDelivr кэш аналогичный, НО есть purge.jsdelivr.net,
+-- который реально инвалидирует кэш за секунды. purgeBeforeFetch=true
+-- дёргает именно его прямо перед началом закачки (внутри уже
+-- запущенного lua_thread — wait() внутри purgeJsdelivr безопасен).
+function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal, cacheBust, preferDirect, purgeBeforeFetch)
     url = tostring(url or ""); dest = tostring(dest or "")
     timeoutMs = tonumber(timeoutMs) or 12000
     if cacheBust == nil then cacheBust = true end -- по умолчанию всегда сбрасываем кэш CDN-зеркал
@@ -598,8 +610,13 @@ function Updater.download(url, dest, onDone, minSize, timeoutMs, estimatedTotal,
         -- скрипта. Теперь всё тело обёрнуто в pcall, и при ошибке
         -- onDone(false, ...) вызывается в любом случае.
         local okThread, errThread = pcall(function()
-            -- purge.jsdelivr только при скачивании .lua (см. doDownload),
-            -- не при каждой проверке version.txt
+            if purgeBeforeFetch then
+                local own, rep, br, file = url:match(
+                    "^https?://raw%.githubusercontent%.com/([^/]+)/([^/]+)/([^/]+)/(.+)$")
+                if own then
+                    pcall(Updater.purgeJsdelivr, own, rep, br, file)
+                end
+            end
             local lastErr = "fail"
             for i = 1, #urls do
                 Updater.dlProg = 0
@@ -668,7 +685,13 @@ function Updater.check(manual)
     Updater.dlProg = 0
 
     local tmp = Updater.tmpDir() .. "/PCStats_upd_ver.txt"
-    -- preferDirect=true: raw.githubusercontent первым (свежее)
+    -- ФИКС: preferDirect=true здесь больше НЕ стоит — raw.githubusercontent
+    -- напрямую тоже кэшируется на стороне GitHub и может часами отдавать
+    -- старое содержимое, а сбросить этот кэш снаружи нечем. jsDelivr
+    -- кэшируется так же, но его кэш МОЖНО принудительно сбросить (см.
+    -- purgeBeforeFetch=true ниже) — поэтому для version.txt он теперь
+    -- идёт ПЕРВЫМ (после purge гарантированно свежий), а direct/githack —
+    -- только как запасной вариант, если jsDelivr не ответил вовсе.
     Updater.download(Updater.versionUrl(), tmp, function(ok, err)
         local function cleanup()
             pcall(os.remove, tmp)
@@ -735,7 +758,7 @@ function Updater.check(manual)
         if type(notifyUpdateAvailable) == "function" then
             pcall(notifyUpdateAvailable, remoteN)
         end
-    end, 1, 10000, nil, true, true)
+    end, 1, 10000, nil, true, false, true)
 end
 
 function Updater.doDownload()
@@ -835,6 +858,12 @@ function Updater.doDownload()
                 if bf then bf:write(old); bf:close() end
             end
         end)
+        -- ФИКС (по просьбе): старый файл скрипта явно удаляется с диска
+        -- ПЕРЕД записью нового (после того как он уже сохранён в .bak
+        -- выше) — новый файл создаётся "с нуля", а не дозаписывается
+        -- поверх старого. Само содержимое старой версии никуда не
+        -- теряется — оно остаётся в path..".bak" на случай отката.
+        pcall(os.remove, path)
         local out = io.open(path, "wb")
         if not out then
             Updater.dlState = "error"

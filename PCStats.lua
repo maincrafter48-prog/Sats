@@ -1,9 +1,14 @@
 script_name("PC Stats")
 script_description("Statistika personazha | Arizona PC | by Marco_Santiago (PC port)")
 script_author("Marco_Santiago")
-script_version("1.8.8")
 
+-- ФИКС: script_version() и SCRIPT_VER раньше были ДВУМЯ разными строками
+-- ("1.8.8" и "1.8.9") — расходились между собой при каждом обновлении,
+-- если забывали поправить обе. Теперь SCRIPT_VER объявлена один раз,
+-- выше, и именно она передаётся в script_version() — единая точка
+-- правды для версии скрипта.
 local SCRIPT_VER = "1.8.9"
+script_version(SCRIPT_VER)
 
 -- имя чат-команды, зарегистрированной сейчас (для перерегистрации при смене)
 local _registeredMenuCmd = nil
@@ -7754,28 +7759,11 @@ local function drawAboutInner(h)
             imgui.SetCursorPos(imgui.ImVec2(SFtext(16), SFtext(32)))
             if us == "ok" then
                 imgui.TextColored(iv4(0.30,0.95,0.40,1.0), u8"\xd3 \xe2\xe0\xf1 \xe0\xea\xf2\xf3\xe0\xeb\xfc\xed\xe0\xff \xe2\xe5\xf0\xf1\xe8\xff")
-                local ln = Updater.localN or Updater.normVer(SCRIPT_VER)
-                local rn = Updater.remoteN or Updater.latest or ln
-                imgui.SetCursorPos(imgui.ImVec2(SFtext(16), SFtext(48)))
-                imgui.TextColored(thDim(),
-                    u8"\xeb\xee\xea\xe0\xeb\xfc\xed\xe0\xff: v" .. tostring(ln) ..
-                    u8"  |  \xf3\xe4\xe0\xeb\xb8\xed\xed\xe0\xff: v" .. tostring(rn))
-                do
-                    local tstr = ""
-                    if Updater.lastCheck and Updater.lastCheck > 0 then
-                        tstr = os.date("%H:%M:%S", Updater.lastCheck)
-                    end
-                    local host = ""
-                    if Updater.lastUrl and Updater.lastUrl ~= "" then
-                        host = tostring(Updater.lastUrl):match("^https?://([^/]+)") or ""
-                    end
-                    if tstr ~= "" or host ~= "" then
-                        imgui.SetCursorPos(imgui.ImVec2(SFtext(16), SFtext(64)))
-                        imgui.TextColored(iv4(0.45,0.50,0.58,1.0),
-                            u8"\xef\xf0\xee\xe2\xe5\xf0\xea\xe0: " .. tstr ..
-                            (host ~= "" and (u8"  \xe8\xf1\xf2\xee\xf7\xed\xe8\xea: " .. host) or ""))
-                    end
-                end
+                -- по просьбе убраны строки "локальная/удалённая" и
+                -- "проверка: .. источник: .." — они выдавали хост/репозиторий
+                -- обновления наружу; сам Updater по-прежнему хранит эти
+                -- значения (Updater.localN/remoteN/lastCheck/lastUrl), их
+                -- просто больше не показываем в меню
             elseif us == "checking" then
                 imgui.TextColored(iv4(0.40,0.85,1.0,1.0),
                     u8"\xcf\xf0\xee\xe2\xe5\xf0\xea\xe0... " .. tostring(Updater.dlProg or 0) .. "%")
